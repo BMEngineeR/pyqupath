@@ -409,6 +409,7 @@ def merge_contours_and_find_circles(gdf, merge_list, radius_expand=0, grid_size=
                 "geometry": merged_geometry,
                 "center_x": center_x,
                 "center_y": center_y,
+                "center": Point(center_x, center_y),
                 "radius": radius,
                 "total_area": polygons_to_merge["area"].sum(),
                 "is_merged": True,
@@ -431,6 +432,7 @@ def merge_contours_and_find_circles(gdf, merge_list, radius_expand=0, grid_size=
                     "geometry": polygon,
                     "center_x": center_x,
                     "center_y": center_y,
+                    "center": Point(center_x, center_y),
                     "radius": radius,
                     "total_area": row["area"],
                     "is_merged": False,
@@ -464,6 +466,8 @@ def merge_contours_and_find_circles(gdf, merge_list, radius_expand=0, grid_size=
 def plot_contours(
     gdf,
     cmap="tab20",
+    plot_patch=True,
+    patch_alpha=0.7,
     plot_center=False,
     plot_id=True,
     plot_circle=True,
@@ -471,6 +475,8 @@ def plot_contours(
     text_size=12,
     text_color="black",
     figsize=(10, 10),
+    bg_img: np.ndarray = None,
+    bg_img_log1p: bool = True,
 ):
     """
     Plot contours with optional centers, IDs, and circles for visualization.
@@ -526,14 +532,22 @@ def plot_contours(
     # Create plot
     fig, ax = plt.subplots(figsize=figsize)
 
+    # If background image is provided, plot it
+    if bg_img is not None:
+        if bg_img_log1p:
+            bg_img = np.log1p(bg_img)
+        ax.imshow(bg_img, cmap="gray")
+        ax.invert_yaxis()
+
     # Plot polygons with assigned colors
-    gdf.plot(
-        ax=ax,
-        color=colors,
-        alpha=0.7,
-        edgecolor="black",
-        linewidth=0.5,
-    )
+    if plot_patch:
+        gdf.plot(
+            ax=ax,
+            color=colors,
+            alpha=patch_alpha,
+            edgecolor="black",
+            linewidth=0.5,
+        )
 
     # Optional: add center points
     if plot_center:
@@ -583,10 +597,9 @@ def plot_contours(
         ax.add_collection(circle_collection)
 
     ax.invert_yaxis()
-    plt.title(f"Filtered Contours (n={len(gdf)})")
-    plt.axis("equal")
+    ax.set_title(f"Filtered Contours (n={len(gdf)})")
+    ax.axis("equal")
     plt.tight_layout()
-    plt.show()
 
     return fig, ax
 
@@ -664,6 +677,7 @@ def tma_dearrayer(
     radius_expand=5,
     merge_list=None,
     grid_size=None,
+    otsu_ratio=1,
 ):
     """
     Complete pipeline for TMA (Tissue Microarray) core detection and dearraying.
@@ -700,6 +714,8 @@ def tma_dearrayer(
     grid_size : float, optional
         Grid size for spatial sorting (in downsampled pixels). If None,
         calculated automatically based on core spacing.
+    otsu_ratio : float, default 1
+        Ratio applied to OTSU thresholding. Adjusts sensitivity of tissue detection.
 
     Returns
     -------
@@ -715,6 +731,8 @@ def tma_dearrayer(
             List of any remaining overlapping circles after merging
         - gdf_original : gpd.GeoDataFrame
             Final cores scaled back to original image resolution
+        - img_dapi_downsampled : np.ndarray
+            Downsampled DAPI image used for processing
 
     Notes
     -----
@@ -734,7 +752,12 @@ def tma_dearrayer(
     img = img_dapi[::downsample_step, ::downsample_step]
 
     # Apply Otsu thresholding
-    _, otsu = cv2.threshold(img, 0, 2**16 - 1, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    otsu_threshold, _ = cv2.threshold(
+        img, 0, 2**16 - 1, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+    )
+    otsu_mask = img >= (otsu_threshold * otsu_ratio)
+    # otsu = img * otsu_mask
+    otsu = otsu_mask.astype(np.uint8)
 
     # Morphological closing to fill gaps
     kernel = create_circular_kernel(kernel_radius)
@@ -783,4 +806,11 @@ def tma_dearrayer(
     # Restore to original scale
     gdf_original = restore_to_original_scale(gdf_merge, downsample_step)
 
-    return gdf_filtered, merge_list, gdf_merge, overlap_list, gdf_original
+    return (
+        gdf_filtered,
+        merge_list,
+        gdf_merge,
+        overlap_list,
+        gdf_original,
+        img_dapi[::downsample_step, ::downsample_step],
+    )
