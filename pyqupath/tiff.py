@@ -1,11 +1,9 @@
 # %%
 import concurrent.futures
 import itertools
-import json
 import multiprocessing
 import os
 import pathlib
-import re
 import uuid
 from pathlib import Path
 from typing import Union
@@ -58,22 +56,37 @@ class TiffZarrReader:
         # Initialize zarr reader
         self.zimg = zarr.open(tifffile.imread(tiff_f, level=0, aszarr=True))
 
-        # Get channel names
-        if self.zimg.ndim == 3:
+        with tifffile.TiffFile(tiff_f) as tif:
+            # channel number
+            axes = tif.series[0].axes
+            supported_axes = ["CYX", "YXC", "YX"]
+
+            if not any(axis in axes for axis in supported_axes):
+                raise ValueError(
+                    f"Unsupported axes in TIFF file: {axes}. Supported axes are {supported_axes}."
+                )
+
+            if axes in ["CYX", "YXC"]:
+                i_channel = axes.index("C")
+                n_channel = self.zimg.shape[i_channel]
+
+            if axes == "YX":
+                n_channel = 1
+
+            # channel names
             if channel_names is None:
-                channel_names = [f"channel_{i}" for i in range(self.zimg.shape[0])]
-            n_channel = self.zimg.shape[0]
-        elif self.zimg.ndim == 2:
-            if channel_names is None:
-                channel_names = ["channel_0"]
-            n_channel = 1
-        else:
-            raise ValueError(f"Unsupported number of dimensions: {self.zimg.ndim}")
-        if len(channel_names) != n_channel:
-            raise ValueError(
-                f"channel_names: Expected {n_channel} channel names, got {len(channel_names)}"
-            )
-        self.channel_names = channel_names
+                if tif.is_ome:
+                    channel_names = self.extract_channel_names_ometiff(tiff_f)
+                elif tif.is_qpi:
+                    channel_names = self.extract_channel_names_qptiff(tiff_f)
+                else:
+                    channel_names = [f"channel_{i}" for i in range(n_channel)]
+
+            if len(channel_names) != n_channel:
+                raise ValueError(
+                    f"channel_names: Expected {n_channel} channel names, got {len(channel_names)}"
+                )
+            self.channel_names = channel_names
 
         # Generate zimg_dict with channel names as keys
         self.zimg_dict = {
@@ -128,10 +141,12 @@ class TiffZarrReader:
             ome_metadata = ElementTree.fromstring(tif.ome_metadata)
             ome_channels = ome_metadata.findall(".//{*}Channel")
             metadata = pd.DataFrame([channel.attrib for channel in ome_channels])
-            if "Name" in metadata.columns:
-                channel_names = metadata["Name"].tolist()
-            else:
-                channel_names = [f"Channel {i}" for i in range(len(metadata))]
+
+            try:
+                channel_names = metadata.Name.tolist()
+            except KeyError:
+                channel_names = [f"channel_{i}" for i in range(len(metadata))]
+
         return channel_names
 
     @staticmethod
@@ -139,35 +154,18 @@ class TiffZarrReader:
         """
         Extract channel names from a QPTIFF file.
         """
-        with tifffile.TiffFile(path) as im:
-            xml_string = im.series[0].pages[0].tags["ImageDescription"].value
-            scan_profile = ElementTree.fromstring(xml_string).find(".//ScanProfile")
-            if scan_profile is None:
-                raise ValueError(
-                    "ScanProfile element not found in the provided XML string."
-                )
-
-            scan_profile_data = json.loads(scan_profile.text)
-            wells = scan_profile_data.get("experimentDescription").get("wells")
-            qptiff_metadata = pd.concat(
-                [
-                    pd.DataFrame(well.get("items")).assign(
-                        wellName=well.get("wellName")
+        with tifffile.TiffFile(path) as tif:
+            channel_names = []
+            for i, page in enumerate(tif.series[0].pages):
+                try:
+                    channel_name = (
+                        ElementTree.fromstring(page.description).find("Name").text
                     )
-                    for well in wells
-                ],
-                ignore_index=True,
-            )
-            is_marker = (qptiff_metadata["markerName"] != "--") & (
-                qptiff_metadata["id"].apply(
-                    lambda x: re.search(r"^0+(-0+)+$", x.strip()) is None
-                )
-            )
-            channel_names = (
-                qptiff_metadata.loc[is_marker]
-                .drop_duplicates(["id", "markerName"])["markerName"]
-                .tolist()
-            )
+                except AttributeError:
+                    channel_name = f"channel_{i}"
+
+                channel_names.append(channel_name)
+
         return channel_names
 
     def channel_index(self, channels: Union[str, list[str]]) -> Union[int, list[int]]:
