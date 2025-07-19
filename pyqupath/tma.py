@@ -449,7 +449,13 @@ def merge_contours_and_find_circles(gdf, merge_list, radius_expand=0, grid_size=
 
     # Apply grid-based sorting
     if grid_size is None:
-        optimal_grid_size = calculate_optimal_grid_size(gdf)
+        if len(gdf) < 2:
+            optimal_grid_size = 1
+        else:
+            optimal_grid_size = calculate_optimal_grid_size(gdf)
+
+        if optimal_grid_size <= 0:
+            optimal_grid_size = 1
         gdf = create_grid_numbering(gdf, grid_size=optimal_grid_size)
     else:
         gdf = create_grid_numbering(gdf, grid_size=grid_size)
